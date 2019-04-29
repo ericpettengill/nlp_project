@@ -1,0 +1,351 @@
+---
+title: "Topic Modelling FDA Recall Text"
+author: "Eric Pettengill & Jeff Church"
+output: ioslides_presentation
+---
+
+```{r LIBRARIES, warning=FALSE, include=FALSE, message=FALSE}
+library(readxl)
+library(tidyverse)
+library(tidytext)
+library(tm)
+# library(quanteda)
+library(topicmodels)
+# library(SnowballC)
+library(broom)
+# library(caret)
+# library(forcats)
+library(kableExtra)
+```
+
+
+```{r DATA, message=FALSE, warning=FALSE, include=FALSE}
+get_labelled_results <- function(){
+  
+labeled1 <- suppressMessages(suppressWarnings(read_xls("UI SW Labelled Results.xls", sheet = 1)))
+labeled2 <- suppressMessages(read_xls("UI SW Labelled Results.xls", sheet = 2))
+labeled3 <- suppressMessages(read_xls("UI SW Labelled Results.xls", sheet = 3))
+
+x1 <- labeled1 %>% 
+  select(DATASET) %>% 
+  pull() %>% 
+  str_split(":", 2, simplify = TRUE) %>% 
+  as.data.frame() %>% 
+  filter(V1 %in% c("RECALL_NUMBER"))
+
+x2 <- labeled2 %>% 
+  select(DATASET) %>% 
+  pull() %>% 
+  str_split(":", 2, simplify = TRUE) %>% 
+  as.data.frame() %>% 
+  filter(V1 %in% c("RECALL_NUMBER"))
+
+x3 <- labeled3 %>% 
+  select(DATASET) %>% 
+  pull() %>% 
+  str_split(":", 2, simplify = TRUE) %>% 
+  as.data.frame() %>% 
+  filter(V1 %in% c("RECALL_NUMBER"))
+
+RECALL_NUMBER <- as.character(rbind(x1, x2, x3)$V2) 
+
+finalx1 <- labeled1 %>% 
+  select(`UI-SW`, `CTRL-SW`,  `SW`, `Root Cause`) %>% 
+  filter(`UI-SW` == "x" | `CTRL-SW` == "x" | `SW` == "x")
+
+finalx2 <- labeled2 %>% 
+  select(`UI-SW`, `CTRL-SW`,  `SW`, `Root Cause`) %>% 
+  filter(`UI-SW` == "x" | `CTRL-SW` == "x" | `SW` == "x")
+
+finalx3 <- labeled3 %>% 
+  select(`UI-SW`, `CTRL-SW`,  `SW`, `Root Cause` = `Other/Root Cause`) %>% 
+  filter(`UI-SW` == "x" | `CTRL-SW` == "x" | `SW` == "x")
+
+final <- bind_rows(finalx1, finalx2, finalx3) %>% 
+  add_column(RECALL_NUMBER)
+
+final$RECALL_NUMBER <- trimws(final$RECALL_NUMBER)
+
+
+get_recalls <- function(){
+# loads excel spreadsheets from elearning
+recall_1 <- read_xlsx("201209-201308 Recalls with Cause.xlsx", sheet = 1) %>% 
+  rename(FDAcause = `FDA Determined Cause`)
+
+recall_2 <- read_xls("201309-201408 Recalls with Causes.xls", sheet = 1) %>% 
+  rename(FDAcause = `FDA Determined Cause`)
+
+recall_3 <- read_xlsx("201409-201508 Recalls with Causes.xlsx", sheet = 2) %>% 
+  rename(FDAcause = `FDA Determined Causes`)
+
+# combine all 3 spreadsheets
+recall <- bind_rows(recall_1, recall_2, recall_3)
+
+return(recall)
+}
+
+recall <- get_recalls() 
+
+recall_labelled <- left_join(recall, final, by = "RECALL_NUMBER") %>% 
+  rename(UI = `UI-SW`, CTRL = `CTRL-SW`, root_cause = `Root Cause`) %>% 
+  mutate(UI = if_else(UI == "x", 1, 0, missing = 0), 
+         CTRL = if_else(CTRL == "x", 1, 0, missing = 0),
+         SW = if_else(SW == "x", 1, 0, missing = 0))
+
+
+return(recall_labelled)
+}
+
+
+
+labeled <- get_labelled_results()
+```
+
+```{r DATA PROCESSING, message=FALSE, warning=FALSE, include=FALSE}
+fda_causes_rm <- c("Counterfeit", "Error in labeling", "Finished device change control", "Incorrect or no expiration date", "Labeling Change Control", "Labeling False and Misleading
+", "Labeling design", "Labeling mix-ups", "Manufacturing material removal", "Material/Component Contamination", "No Marketing Application", "Package design/selection
+", "Packaging", "Packaging change control", "Packaging process control", "Release of Material/Component prior to receiving test results", "Reprocessing Controls", "Storage")
+
+data <- labeled %>% 
+  # filter out FDA cause categories according to paper
+  filter(!(FDAcause %in% fda_causes_rm)) %>% 
+  mutate(error = if_else(UI == 1 | CTRL == 1 | SW == 1, 1, 0)) %>% 
+  # select cause and recall text
+  select(RECALL_NUMBER, MANUFACTURER_RECALL_REASON, FDAcause, error)
+
+train_data <- data %>% 
+  filter(str_sub(RECALL_NUMBER, -4, -1) == 2012 | str_sub(RECALL_NUMBER, -4, -1) == 2013 | str_sub(RECALL_NUMBER, -4, -1) == 2014)
+
+test_data <- data %>% 
+  filter(str_sub(RECALL_NUMBER, -4, -1) == 2015)
+
+get_grams <- function(df){
+
+# unigram
+unigram_counts <- df %>% 
+  unnest_tokens(word, MANUFACTURER_RECALL_REASON) %>% 
+  anti_join(stop_words, by = "word") %>% 
+  # mutate(word = wordStem(word)) %>%
+  count(RECALL_NUMBER, word, sort = TRUE)
+
+# bigram 
+bigram_counts <- df %>% 
+  unnest_tokens(word, MANUFACTURER_RECALL_REASON, token = "ngrams", n = 2) %>% 
+  separate(word, c("word1", "word2"), sep = " ") %>% 
+  filter(!word1 %in% stop_words$word) %>% 
+  filter(!word2 %in% stop_words$word) %>% 
+  unite(word, word1, word2, sep = " ") %>% 
+  count(RECALL_NUMBER, word, sort = TRUE)
+
+# trigram
+trigram_counts <- df %>% 
+  unnest_tokens(word, MANUFACTURER_RECALL_REASON, token = "ngrams", n = 3) %>% 
+  separate(word, c("word1", "word2", "word3"), sep = " ") %>% 
+  filter(!word1 %in% stop_words$word) %>% 
+  filter(!word2 %in% stop_words$word) %>% 
+  filter(!word3 %in% stop_words$word) %>% 
+  unite(word, word1, word2, word3, sep = " ") %>% 
+  count(RECALL_NUMBER, word, sort = TRUE)
+
+# count words using unigram and bigram method
+data_counts <- bind_rows(unigram_counts, bigram_counts, trigram_counts) %>% 
+  arrange(desc(n))
+
+return(data_counts)
+
+}
+
+train_data_counts <- get_grams(train_data)
+test_data_counts <- get_grams(test_data)
+
+
+get_dtm <- function(df) {
+  
+# document term matrix using tf_idf statistic
+data_dtm <- df %>% 
+  bind_tf_idf(word, RECALL_NUMBER, n) %>% 
+  cast_dtm(RECALL_NUMBER, word, n)
+
+return(data_dtm)
+}
+
+train_dtm <- get_dtm(train_data_counts)
+test_dtm <- get_dtm(test_data_counts)
+```
+
+
+```{r MODEL/PLOTS, message=FALSE, warning=FALSE, include=FALSE, cache=TRUE}
+# fits LDA model with k=2 topics on test data
+lda_fit <- LDA(train_dtm, k = 2, method = "GIBBS", control = list(seed = 1234))
+
+# get predicted probabilities of each topic for each recall document
+lda_pred <- posterior(lda_fit, test_dtm)[["topics"]] %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "RECALL_NUMBER") %>% 
+  mutate(topic = if_else(`1` > `2`, 1, 2)) %>% 
+  inner_join(test_data, by = "RECALL_NUMBER") %>% 
+  select(RECALL_NUMBER, `1`, `2`, topic, error)
+
+lda_pred_df <- posterior(lda_fit, test_dtm)[["topics"]] %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "RECALL_NUMBER") %>% 
+  mutate(topic = if_else(`1` > `2`, 1, 2)) %>% 
+  head(10)
+
+# confusion matrix for test data
+lda_confusion_matrix <- table(lda_pred$topic, lda_pred$error)
+
+# looking at true errors predicted as non-errors
+lda_error_fp <- lda_pred %>% 
+  filter(topic==1 & error==1) %>% 
+  inner_join(test_data)
+
+# look at a few non-errors classified as errors
+lda_nonerror_fp <- lda_pred %>% 
+  filter(topic==2 & error==0) %>% 
+  inner_join(test_data) %>% 
+  top_n(5)
+
+# probabilities each word belongs to one of k=20 topics
+lda_word_probs <- tidy(lda_fit, matrix = "beta")
+
+# estimated probability each document belongs to each topic
+lda_cause_probs <- tidy(lda_fit, matrix = "gamma")
+
+################################
+# top 10 words within each topic
+lda_topwords <- lda_word_probs %>% 
+  group_by(topic) %>% 
+  top_n(10, beta) %>% 
+  ungroup() %>% 
+  arrange(topic, -beta) %>% 
+  ggplot() + 
+  aes(term, beta, fill = factor(topic)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~topic, scales = "free") +
+  coord_flip()
+
+################################
+# dist. of topics
+lda_topic_dist <- inner_join(lda_cause_probs, train_data, by = c(document = "RECALL_NUMBER")) %>% 
+  select(document, topic, gamma, error) %>% 
+  ggplot(aes(factor(topic), gamma)) +
+  geom_boxplot() + 
+  facet_wrap(~error)
+```
+
+## FDA Challenge
+
+- Data: FDA medical device recalls from 2012-2015
+    + 7,771 recalls
+    + 423 due to software UI issues
+- Goal: Identify software UI recalls automatically using NLP based on manufacturer's description of the recall
+    + Example: "Sterility of device may be compromised due to lack of package integrity"
+  
+## Latent Dirichlet Allocation(LDA)
+
+- Identifies K topics that best generate corpus
+- Determines the mix of topics in each document
+- A topic is a list of words along with their prevalence
+- Unsupervised: neither corpus documents nor output are labeled
+    + Can infer what a topic is by looking at its most common words
+  
+## Example 1
+
+```{r echo=FALSE, out.width="90%"}
+knitr::include_graphics("lda_simplex.png")
+```
+
+- Topics: Technology, business, arts
+- For FDA problem we took closest topic
+
+## Example 2 | General vs. Specific Topics
+
+```{r echo=FALSE, out.width="90%"}
+knitr::include_graphics("20Topics.png")
+```
+
+## Example 3 | Useful for Recommendations
+
+```{r echo=FALSE, out.width="90%"}
+knitr::include_graphics("lda_doc_proportions.png")
+```
+
+## Tuning Parameters
+
+```{r echo=FALSE, out.width="65%"}
+knitr::include_graphics("alpha.gif")
+```
+
+
+## Data Processing
+
+1. Merge FDA text data with labelled data
+2. Removed FDA determined causes as mentioned in paper
+3. Created new error label
+    - IF (recall labelled UI, CTRL, or SW error) THEN (error) ELSE (no error)
+4. Removed stop words and took all unigrams, bigrams, and trigrams
+5. Document Term Matrix
+6. Train(years 2012-2014)/Test(2015) split
+7. LDA with 2 topics
+
+## Model (2 topics) | Top 10 Words in Each Topic
+
+```{r echo=FALSE}
+lda_topwords
+```
+
+## Model (2 Topics) | Distribution of Document Topic Probabilities
+
+```{r echo=FALSE}
+lda_topic_dist
+```
+
+## Classification Predictions | Probability of each Recall belonging to Topic 1/Topic 2
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+kable(lda_pred_df[1:7, ]) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+  add_header_above(c(" ", "Predicted Topic Probabilities" = 2, "Predicted Topic" = 1))
+```
+
+
+## Predicted Results | Confusion Matrix
+
+```{r echo=FALSE}
+kable(lda_confusion_matrix, row.names = TRUE) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>% 
+  add_header_above(c(" ", "No-error"=1, "Error"=1)) %>% 
+  add_footnote(c("Accuracy: 46.5%", "TPR: 95.9%"), notation = "symbol")
+```
+
+## Misclassified Recalls | False Negatives
+
+```{r echo=FALSE}
+temp1 <- lda_error_fp %>% select(2:6)
+
+kable(temp1, digits = 2) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+  add_header_above(c("Topic Probabilities" = 2, "Predicted"=1, "Actual"=1, " ")) %>% 
+  scroll_box(width = "100%", height = "500px")
+```
+
+## Misclassified Recalls | False Positives
+
+```{r echo=FALSE}
+temp2 <- lda_nonerror_fp %>% select(2:6)
+
+kable(temp2, digits = 2) %>% 
+  kable_styling(bootstrap_options = c("striped", "hover")) %>% 
+  add_header_above(c("Topic Probabilities" = 2, "Predicted"=1, "Actual"=1, " ")) %>% 
+  scroll_box(width = "100%", height = "500px")
+  
+```
+
+## Conclusions
+
+- With topic modelling using LDA we were able to correctly identify ~96% of software UI errors
+- However, it produces a lot of false positives, due to many similar words between non-software UI errors and software UI errors
+- Removing some of these common words may improve overall accuracy and reduce the false positives
+
+
